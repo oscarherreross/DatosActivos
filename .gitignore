@@ -1,0 +1,10 @@
+# Bases de datos de cada activo: pesan cientos de MB y GitHub no admite
+# archivos de más de 100 MB. Se regeneran con cargar_datos.bat.
+activos/*/*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Python
+__pycache__/
+*.pyc

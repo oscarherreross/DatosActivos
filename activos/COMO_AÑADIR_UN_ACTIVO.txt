@@ -1,0 +1,31 @@
+﻿CÓMO AÑADIR UN ACTIVO NUEVO
+===========================
+
+Cada activo tiene su carpeta aquí dentro, con el nombre de su moneda
+(BTC, ETH, XRP...). Dentro está su base de datos, por ejemplo BTC\BTC.db,
+con todas sus velas y los indicadores de cada vela.
+
+Para añadir uno nuevo (por ejemplo Solana):
+
+  1. Abre activos.txt (en esta misma carpeta) y añade una línea con su
+     par de Binance contra USDT, en mayúsculas:  SOLUSDT
+     Tiene que ser un par spot que exista en Binance. Para comprobarlo,
+     búscalo en https://www.binance.com/es/trade/SOL_USDT?type=spot
+
+  2. Cierra DBeaver (o DB Browser) si lo tienes abierto.
+
+  3. Haz doble clic en cargar_datos.bat, en la carpeta DatosActivos.
+     - Se crea sola la carpeta del activo (activos\SOL) con su base de
+       datos SOL.db, y se descarga todo su histórico en las 6
+       temporalidades con sus indicadores. Tarda unos 5-15 minutos.
+     - Los activos que ya estaban solo reciben las velas nuevas.
+
+  4. Para verlo en DBeaver, crea una conexión SQLite al archivo
+     activos\SOL\SOL.db.
+
+No hace falta crear la carpeta a mano, ni tocar ningún script.
+Si creas una carpeta vacía con el nombre de un activo, no pasa nada:
+solo se llena cuando su par está en activos.txt y ejecutas la carga.
+
+Para quitar un activo de las cargas, borra su línea de activos.txt
+(o ponle un # delante). Sus datos se quedan en su carpeta.

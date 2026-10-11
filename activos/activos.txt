@@ -1,0 +1,11 @@
+# Activos que carga cargar_datos.bat: pares spot de Binance, uno por línea.
+# Para añadir otro, escribe su par (p. ej. SOLUSDT) y vuelve a ejecutar la carga.
+# Cada activo se guarda en su carpeta aquí al lado (BTC, ETH...), que se crea sola.
+# Más detalles en COMO_AÑADIR_UN_ACTIVO.txt
+BTCUSDT
+AVAXUSDT
+LINKUSDT
+NEARUSDT
+ETHUSDT
+ONDOUSDT
+XRPUSDT
