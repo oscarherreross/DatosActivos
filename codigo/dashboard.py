@@ -276,8 +276,8 @@ def main() -> None:
     referencia = capital * (1 - f) * tramo["cierre"].to_numpy(float) / float(tramo["apertura"].iloc[0])
     compradas, sin_invertir = participaciones(referencia, np.ones(len(tramo), dtype=np.int8), cambios, f)
     final = con_aportaciones(referencia[-1] * (1 - f), aportacion, compradas, sin_invertir, len(cambios))
-    filas = [{"Estrategia": "Comprar y mantener", "Rentabilidad %": (final / aportado - 1) * 100,
-              "Capital final": final,
+    filas = [{"Estrategia": "Comprar y mantener", "Total aportado": aportado,
+              "Capital final": final, "Rentabilidad %": (final / aportado - 1) * 100,
               "Máx. caída %": float(((1 - referencia / np.maximum.accumulate(referencia)) * 100).max()),
               "Operaciones": 1, "En mercado %": 100.0}]
     dibujado.append(con_aportaciones(referencia[idx], aportacion, compradas, sin_invertir, hechas))
@@ -293,8 +293,9 @@ def main() -> None:
         dibujado.append(con_aportaciones(valores, aportacion, compradas, sin_invertir, hechas))
         fig.add_scatter(x=fechas, y=dibujado[-1], name=nombre, mode="lines",
                         line=dict(color=COLORES[i % len(COLORES)], width=2), hovertemplate="%{y:,.0f} USDT")
-        filas.append({"Estrategia": nombre, "Rentabilidad %": (final / aportado - 1) * 100,
-                      "Capital final": final, "Máx. caída %": m["max_drawdown_pct"],
+        filas.append({"Estrategia": nombre, "Total aportado": aportado,
+                      "Capital final": final, "Rentabilidad %": (final / aportado - 1) * 100,
+                      "Máx. caída %": m["max_drawdown_pct"],
                       "Operaciones": m["num_operaciones"], "Acierto %": m["pct_acierto"],
                       "Profit factor": m["profit_factor"],
                       "Sin el 5 % mejor %": m["rentabilidad_sin_mejores_5pct_pct"],
@@ -317,32 +318,45 @@ def main() -> None:
         st.caption(f"El gráfico dibuja {miles(len(idx))} de las {miles(len(tramo))} velas, repartidas por igual. "
                    "Las cifras de la tabla se calculan con todas.")
 
-    # Columnas de la tabla: decimales y ayuda. Los números se escriben como en el navegador.
+    # Columnas de la tabla: decimales y explicación, que sale al pasar por la cabecera y en la
+    # lista de debajo de la tabla. Los números se escriben como en el navegador.
     columnas = {
-        "Estrategia": (None, None),
-        "Rentabilidad %": (1, "Ganancia sobre todo lo aportado: el capital inicial y las aportaciones mensuales."),
-        "Capital final": (0, "En USDT, con las comisiones descontadas."),
-        "Máx. caída %": (1, "Mayor caída del capital desde un máximo, con precios de cierre. "
-                            "Es la de la estrategia con un único capital inicial: las aportaciones no cuentan."),
-        "Operaciones": (0, None),
-        "Acierto %": (1, "Operaciones que acaban en ganancia."),
-        "Profit factor": (2, "Suma de ganancias entre suma de pérdidas. Por encima de 1 gana más de lo que pierde."),
-        "Sin el 5 % mejor %": (1, "Rentabilidad total quitando el 5 % de las operaciones con mejor resultado. "
-                                  "Si pasa a negativo, la estrategia es frágil."),
-        "En mercado %": (1, "Velas con una posición abierta."),
+        "Estrategia": (None, "Estrategia marcada, con sus parámetros. Comprar y mantener es la referencia: compra "
+                             "al principio y con cada aportación, y no vende hasta el final."),
+        "Total aportado": (0, "Dinero puesto en total, en USDT: el capital inicial más todas las aportaciones "
+                              "mensuales del periodo. Es el mismo en todas las filas."),
+        "Capital final": (0, "Lo que habría al final del periodo, en USDT, con las comisiones descontadas y la "
+                             "posición que siga abierta cerrada al último precio."),
+        "Rentabilidad %": (1, "Ganancia o pérdida sobre el total aportado: capital final entre total aportado, "
+                              "menos 1."),
+        "Máx. caída %": (1, "Mayor caída del capital desde un máximo anterior, con precios de cierre y sin contar "
+                            "las aportaciones."),
+        "Operaciones": (0, "Veces que la estrategia entra en el mercado."),
+        "Acierto %": (1, "Porcentaje de operaciones que acaban en ganancia, con las comisiones descontadas."),
+        "Profit factor": (2, "Suma de las ganancias entre suma de las pérdidas, en USDT. Por encima de 1 gana más "
+                             "de lo que pierde."),
+        "Sin el 5 % mejor %": (1, "Rentabilidad que quedaría quitando el 5 % de las operaciones con mejor resultado "
+                                  "(como mínimo, una). Si pasa a negativo, el resultado depende de unas pocas "
+                                  "operaciones y la estrategia es frágil."),
+        "En mercado %": (1, "Porcentaje de velas con una posición abierta."),
     }
     tabla = pd.DataFrame(filas, columns=list(columnas))
     tabla = tabla.round({c: dec for c, (dec, _) in columnas.items() if dec is not None})
     st.dataframe(tabla, hide_index=True, placeholder="-", column_config={
-        c: st.column_config.NumberColumn(format="localized", help=ayuda)
-        for c, (dec, ayuda) in columnas.items() if dec is not None})
+        c: (st.column_config.TextColumn(help=texto) if dec is None
+            else st.column_config.NumberColumn(format="localized", help=texto))
+        for c, (dec, texto) in columnas.items()})
+    st.markdown("**Qué representa cada columna**\n\n"
+                + "\n".join(f"- **{c}**: {texto}" for c, (_, texto) in columnas.items())
+                + "\n\nDe la caída máxima en adelante, las columnas describen la estrategia con un único capital "
+                  "inicial: las aportaciones mensuales solo cambian el total aportado, el capital final y la "
+                  "rentabilidad.")
     st.caption("La señal se calcula al cierre de una vela y la orden se ejecuta en la apertura de la siguiente. "
                "Cada entrada usa todo el capital. " + (NOTA_CORTOS if direccion != "solo_largos" else ""))
     if aportacion:
         st.caption("Cada aportación entra en la apertura de la primera vela del mes: si la estrategia está dentro "
                    "del mercado compra más en ese momento, con comisión; si está fuera, espera en liquidez hasta la "
-                   "siguiente entrada. Las aportaciones cambian el gráfico, la rentabilidad y el capital final; el "
-                   "resto de la tabla describe la estrategia con un único capital inicial.")
+                   "siguiente entrada.")
 
 
 if __name__ == "__main__":

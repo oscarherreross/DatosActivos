@@ -332,8 +332,9 @@ También se puede abrir desde una consola en la carpeta DatosActivos: `streamlit
   mensuales, lo aportado hasta cada momento. Con más de 4.000 velas dibuja 4.000 repartidas por igual. En
   escala logarítmica el eje no baja de una milésima del capital inicial; una estrategia que lo pierde casi
   todo se sale por abajo.
-- **Tabla**: las mismas métricas que `backtests`, calculadas con todas las velas. Se ordena pulsando en
-  la cabecera de una columna.
+- **Tabla**: total aportado, capital final y rentabilidad, y las mismas métricas que `backtests`,
+  calculadas con todas las velas. Se ordena pulsando en la cabecera de una columna. Debajo de la tabla se
+  explica qué representa cada columna.
 
 Usa el mismo motor y las mismas reglas que `ejecutar_backtests.bat`, así que las cifras coinciden. Solo
 lee las bases de datos de los activos: no guarda nada en `backtests.db`. La primera vez que se elige una
