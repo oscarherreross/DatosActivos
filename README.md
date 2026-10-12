@@ -315,14 +315,23 @@ de cada una con todo el histórico, junto a comprar y mantener. Para cerrarlo, c
 
 También se puede abrir desde una consola en la carpeta DatosActivos: `streamlit run codigo/dashboard.py`.
 
-- **Condiciones** (a la izquierda): activo, temporalidad, dirección, periodo, comisión y capital inicial.
-  Si `Desde` y `Hasta` se dejan vacíos se usa todo el histórico. Empieza en solo largos.
+- **Condiciones** (a la izquierda): activo, temporalidad, dirección, periodo, comisión, capital inicial y
+  aportación mensual. Si `Desde` y `Hasta` se dejan vacíos se usa todo el histórico. Empieza en solo largos.
+- **Aportación mensual**: con 0 solo se invierte el capital inicial. Con otra cantidad, se añade en la
+  apertura de la primera vela de cada mes (en semanal, la del primer lunes). Si la estrategia está dentro
+  del mercado, compra más en ese momento, con comisión; si está fuera, espera en liquidez y entra con el
+  resto en la siguiente señal. En comprar y mantener cada aportación compra al momento. La rentabilidad de
+  la tabla pasa a ser sobre todo lo aportado; la caída máxima, el acierto y el resto de columnas siguen
+  siendo las de la estrategia con un único capital inicial. Con cortos, una aportación que llega con un
+  corto abierto se reparte como el capital que ya había en él, y si la estrategia ha agotado el capital
+  las aportaciones posteriores se quedan sin invertir.
 - **Casillas**: dos cruces de medias (EMA 20/50 y EMA 50/200), RSI 30/70, cruce del MACD y rebote en
   Bollinger. En `Parámetros` se cambian el tipo y los periodos de las medias y los niveles del RSI. Las
   medias que no están guardadas en la base de datos (por ejemplo una EMA 30) se calculan al momento.
-- **Gráfico**: capital al cierre de cada vela. La línea de puntos es el capital inicial. Con más de 4.000
-  velas dibuja 4.000 repartidas por igual. En escala logarítmica el eje no baja de una milésima del
-  capital inicial; una estrategia que lo pierde casi todo se sale por abajo.
+- **Gráfico**: capital al cierre de cada vela. La línea de puntos es el capital inicial o, con aportaciones
+  mensuales, lo aportado hasta cada momento. Con más de 4.000 velas dibuja 4.000 repartidas por igual. En
+  escala logarítmica el eje no baja de una milésima del capital inicial; una estrategia que lo pierde casi
+  todo se sale por abajo.
 - **Tabla**: las mismas métricas que `backtests`, calculadas con todas las velas. Se ordena pulsando en
   la cabecera de una columna.
 

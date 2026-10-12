@@ -111,7 +111,8 @@ def leer_velas(con: sqlite3.Connection, activo_id: int, temporalidad: str,
 def simular(v: pd.DataFrame, senales: dict, direccion: str, comision_pct: float,
             capital_inicial: float) -> tuple[list[dict], dict]:
     """Recorre las velas en orden y devuelve las operaciones y datos de la curva de capital.
-    curva["valores"] es el capital a precio de mercado al cierre de cada vela."""
+    curva["valores"] es el capital a precio de mercado al cierre de cada vela y
+    curva["posiciones"] la posición que hubo durante la vela (1 largo, -1 corto, 0 fuera)."""
     f = comision_pct / 100.0
     largos = direccion in ("largos_y_cortos", "solo_largos")
     cortos = direccion in ("largos_y_cortos", "solo_cortos")
@@ -133,6 +134,7 @@ def simular(v: pd.DataFrame, senales: dict, direccion: str, comision_pct: float,
     senal_abrir = ""
     operaciones: list[dict] = []
     valores = np.zeros(n)   # si el capital se agota, las velas que quedan se quedan en 0
+    posiciones = np.zeros(n, dtype=np.int8)
     max_capital, max_dd, velas_dentro = capital, 0.0, 0
 
     def abrir(i: int, d: int, fecha_senal: str) -> None:
@@ -166,6 +168,7 @@ def simular(v: pd.DataFrame, senales: dict, direccion: str, comision_pct: float,
         if pendiente_abrir and capital > 0:
             abrir(i, pendiente_abrir, senal_abrir)
         pendiente_cerrar, pendiente_abrir = None, 0
+        posiciones[i] = pos
 
         # 2) Cierre de la vela: capital a precio de mercado y nuevas señales
         if pos == 0:
@@ -208,7 +211,8 @@ def simular(v: pd.DataFrame, senales: dict, direccion: str, comision_pct: float,
             senal_abrir = fecha_ci[i]
 
     curva = {"capital_final": capital, "max_drawdown_pct": max_dd,
-             "tiempo_en_mercado_pct": velas_dentro / n * 100 if n else None, "valores": valores}
+             "tiempo_en_mercado_pct": velas_dentro / n * 100 if n else None,
+             "valores": valores, "posiciones": posiciones}
     return operaciones, curva
 
 
