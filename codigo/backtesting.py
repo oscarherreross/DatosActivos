@@ -45,6 +45,7 @@ import pandas as pd
 
 from cargar_datos import abrir_bd_activo, abrir_principal, activos_registrados
 from estrategias import ESTRATEGIAS, FUNCIONES
+from indicadores import COLUMNAS_INDICADORES
 
 VERSION_MOTOR = "1.0"
 
@@ -95,7 +96,13 @@ def leer_velas(con: sqlite3.Connection, activo_id: int, temporalidad: str,
         consulta += " AND fecha_cierre_utc <= ?"
         parametros.append(hasta)
     consulta += " ORDER BY fecha_hora_utc"
-    return pd.read_sql_query(consulta, con, params=parametros)
+    v = pd.read_sql_query(consulta, con, params=parametros)
+    # Un indicador con todas las velas en NULL (p. ej. la EMA 200 semanal de un activo con
+    # pocas velas) se lee sin tipo numérico y no se puede comparar: se pasa a número, con NaN.
+    for c in COLUMNAS_INDICADORES:
+        if c in v.columns and v[c].dtype == object:
+            v[c] = v[c].astype(float)
+    return v
 
 
 # ---------------------------------------------------------------------
@@ -103,7 +110,8 @@ def leer_velas(con: sqlite3.Connection, activo_id: int, temporalidad: str,
 # ---------------------------------------------------------------------
 def simular(v: pd.DataFrame, senales: dict, direccion: str, comision_pct: float,
             capital_inicial: float) -> tuple[list[dict], dict]:
-    """Recorre las velas en orden y devuelve las operaciones y datos de la curva de capital."""
+    """Recorre las velas en orden y devuelve las operaciones y datos de la curva de capital.
+    curva["valores"] es el capital a precio de mercado al cierre de cada vela."""
     f = comision_pct / 100.0
     largos = direccion in ("largos_y_cortos", "solo_largos")
     cortos = direccion in ("largos_y_cortos", "solo_cortos")
@@ -124,6 +132,7 @@ def simular(v: pd.DataFrame, senales: dict, direccion: str, comision_pct: float,
     pendiente_abrir = 0                   # dirección a abrir en la próxima apertura
     senal_abrir = ""
     operaciones: list[dict] = []
+    valores = np.zeros(n)   # si el capital se agota, las velas que quedan se quedan en 0
     max_capital, max_dd, velas_dentro = capital, 0.0, 0
 
     def abrir(i: int, d: int, fecha_senal: str) -> None:
@@ -171,6 +180,7 @@ def simular(v: pd.DataFrame, senales: dict, direccion: str, comision_pct: float,
                 cerrar(cierre[i], fecha_ci[i], "capital_agotado", i - abierta["indice"] + 1)
                 max_dd = 100.0
                 break
+        valores[i] = valor_actual
         max_capital = max(max_capital, valor_actual)
         max_dd = max(max_dd, (1 - valor_actual / max_capital) * 100)
 
@@ -198,7 +208,7 @@ def simular(v: pd.DataFrame, senales: dict, direccion: str, comision_pct: float,
             senal_abrir = fecha_ci[i]
 
     curva = {"capital_final": capital, "max_drawdown_pct": max_dd,
-             "tiempo_en_mercado_pct": velas_dentro / n * 100 if n else None}
+             "tiempo_en_mercado_pct": velas_dentro / n * 100 if n else None, "valores": valores}
     return operaciones, curva
 
 

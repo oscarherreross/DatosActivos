@@ -12,6 +12,7 @@ DatosActivos/
 ├── cargar_datos.bat            doble clic: descarga o amplía las velas
 ├── recalcular_indicadores.bat  doble clic: recalcula los indicadores
 ├── ejecutar_backtests.bat      doble clic: prueba las estrategias
+├── dashboard.bat               doble clic: compara estrategias en un gráfico
 ├── README.md
 ├── activos/
 │   ├── activos.txt                lista de activos que se cargan
@@ -27,7 +28,7 @@ DatosActivos/
 
 Lo que es de un solo activo (sus velas y sus indicadores) está en su carpeta dentro de
 `activos/`. Lo que mezcla varios activos está en `resultados/`. En la raíz solo quedan los
-tres .bat que se usan con doble clic.
+cuatro .bat que se usan con doble clic.
 
 **Para añadir un activo** basta con escribir su par en `activos/activos.txt` y ejecutar
 `cargar_datos.bat`; su carpeta se crea sola. Los pasos están en
@@ -40,6 +41,7 @@ tres .bat que se usan con doble clic.
 | `cargar_datos.bat` | Doble clic para descargar o ampliar las velas de los activos |
 | `recalcular_indicadores.bat` | Doble clic para recalcular los indicadores de las velas ya guardadas (p. ej. tras añadir uno nuevo) |
 | `ejecutar_backtests.bat` | Doble clic para probar las estrategias y guardar los resultados |
+| `dashboard.bat` | Doble clic para abrir el dashboard que compara estrategias en un gráfico |
 | `activos/activos.txt` | Lista de activos que se cargan (un par de Binance por línea) |
 | `activos/BTC/BTC.db`, `activos/AVAX/AVAX.db`... | Base de datos de cada activo; se crean la primera vez que se carga ese activo |
 | `resultados/backtests.db` | Base de datos principal: activos, estrategias, backtests y operaciones |
@@ -49,6 +51,7 @@ tres .bat que se usan con doble clic.
 | `codigo/recalcular_indicadores.py` | Lo que ejecuta `recalcular_indicadores.bat` |
 | `codigo/backtesting.py` | Motor de backtesting: simula las estrategias sobre las velas guardadas |
 | `codigo/estrategias.py` | Definición de las estrategias y sus parámetros |
+| `codigo/dashboard.py` | Lo que abre `dashboard.bat`: casillas de estrategias, gráfico del capital y tabla de métricas |
 | `codigo/estudio_tendencias.py` | Estudio de qué situaciones de los indicadores precedieron a subidas |
 | `codigo/esquema.sql` | Estructura de la base de datos de cada activo |
 | `codigo/esquema_backtesting.sql` | Estructura de `backtests.db` |
@@ -303,6 +306,32 @@ FROM operaciones o JOIN v_backtests b ON b.id = o.backtest_id
 WHERE b.simbolo = 'BTCUSDT' AND b.temporalidad = '1d' AND b.estrategia = 'cruce_ema_20_50'
 ORDER BY o.numero;
 ```
+
+## Dashboard
+
+Haz doble clic en **`dashboard.bat`**. Instala streamlit y plotly si hace falta y abre el dashboard en el
+navegador. Se marcan las estrategias y el gráfico muestra al momento cómo habría evolucionado el capital
+de cada una con todo el histórico, junto a comprar y mantener. Para cerrarlo, cierra la ventana negra.
+
+También se puede abrir desde una consola en la carpeta DatosActivos: `streamlit run codigo/dashboard.py`.
+
+- **Condiciones** (a la izquierda): activo, temporalidad, dirección, periodo, comisión y capital inicial.
+  Si `Desde` y `Hasta` se dejan vacíos se usa todo el histórico. Empieza en solo largos.
+- **Casillas**: dos cruces de medias (EMA 20/50 y EMA 50/200), RSI 30/70, cruce del MACD y rebote en
+  Bollinger. En `Parámetros` se cambian el tipo y los periodos de las medias y los niveles del RSI. Las
+  medias que no están guardadas en la base de datos (por ejemplo una EMA 30) se calculan al momento.
+- **Gráfico**: capital al cierre de cada vela. La línea de puntos es el capital inicial. Con más de 4.000
+  velas dibuja 4.000 repartidas por igual. En escala logarítmica el eje no baja de una milésima del
+  capital inicial; una estrategia que lo pierde casi todo se sale por abajo.
+- **Tabla**: las mismas métricas que `backtests`, calculadas con todas las velas. Se ordena pulsando en
+  la cabecera de una columna.
+
+Usa el mismo motor y las mismas reglas que `ejecutar_backtests.bat`, así que las cifras coinciden. Solo
+lee las bases de datos de los activos: no guarda nada en `backtests.db`. La primera vez que se elige una
+temporalidad de 5m tarda unos 15 segundos en leer las velas; después responde al momento.
+
+Para añadir una estrategia a las casillas, escribe su función en `estrategias.py`, regístrala en
+`FUNCIONES` y añádela a `CATALOGO` y a `TITULOS`, en `codigo/dashboard.py`.
 
 ## Estudio de tendencias
 

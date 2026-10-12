@@ -26,6 +26,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from backtesting import leer_velas
 from cargar_datos import BD_PRINCIPAL, CARPETA_RESULTADOS, ruta_bd_activo
 
 SALIDA = CARPETA_RESULTADOS / "estudio_tendencias"
@@ -39,8 +40,9 @@ HORIZONTES = {
 
 
 def leer(con, activo_id: int, tf: str) -> pd.DataFrame:
-    v = pd.read_sql_query("SELECT * FROM velas WHERE activo_id = ? AND temporalidad = ? ORDER BY fecha_hora_utc",
-                          con, params=(activo_id, tf))
+    # leer_velas deja como número (NaN) los indicadores que un activo con pocas velas tiene
+    # en NULL en toda la serie, como la EMA 200 semanal; si no, no se podrían comparar.
+    v = leer_velas(con, activo_id, tf, None, None)
     v["fecha_cierre"] = pd.to_datetime(v["fecha_cierre_utc"], utc=True)
     return v
 
@@ -205,7 +207,7 @@ def main() -> None:
     SALIDA.mkdir(exist_ok=True)
     res.to_csv(SALIDA / "resultados.csv", index=False, sep=";", decimal=",", encoding="utf-8-sig")
 
-    # Resumen: por situación, temporalidad y horizonte, media de los 4 activos y consistencia
+    # Resumen: por situación, temporalidad y horizonte, media de los activos y consistencia
     clave = ["temporalidad", "horizonte", "familia", "situacion"]
     t = res[res["periodo"] == "Todo"].groupby(clave).agg(
         activos=("simbolo", "nunique"), velas=("velas", "sum"), episodios=("episodios", "sum"),
