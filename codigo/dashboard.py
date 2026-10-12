@@ -3,7 +3,8 @@ DatosActivos - dashboard para comparar estrategias.
 
 Se marcan las estrategias y el gráfico muestra al momento cómo habría
 evolucionado el capital de cada una con todo el histórico del activo, junto
-a comprar y mantener. Usa el mismo motor que backtesting.py (simular y
+a comprar y mantener, con un único capital inicial o añadiendo además una
+aportación cada mes. Usa el mismo motor que backtesting.py (simular y
 metricas) y las funciones de estrategias.py. Solo lee las bases de datos:
 no guarda nada en ellas.
 
@@ -126,13 +127,49 @@ def puntos_a_dibujar(n: int) -> np.ndarray:
 
 @st.cache_data(max_entries=300, show_spinner=False)
 def calcular(_velas: pd.DataFrame, clave_velas: tuple, i0: int, i1: int, codigo: str, parametros: dict,
-             direccion: str, comision: float, capital: float) -> tuple[np.ndarray, dict]:
-    """Simula una estrategia en las velas i0..i1 y devuelve su curva de capital (solo los puntos
-    que se dibujan) y sus métricas. _velas no cuenta para la caché: la identifica clave_velas."""
+             direccion: str, comision: float, capital: float) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
+    """Simula una estrategia en las velas i0..i1 con un único capital inicial. Devuelve su curva
+    de capital (solo los puntos que se dibujan), lo que compraría cada aportación mensual (ver
+    participaciones) y sus métricas. _velas no cuenta para la caché: la identifica clave_velas."""
     v, p = preparar(_velas, codigo, parametros)
     v = v.iloc[i0:i1]
     ops, curva = simular(v, FUNCIONES[codigo](v, p), direccion, comision, capital)
-    return curva["valores"][puntos_a_dibujar(len(v))], metricas(ops, curva, capital)
+    compradas, sin_invertir = participaciones(curva["valores"], curva["posiciones"], cambios_de_mes(v),
+                                              comision / 100)
+    return curva["valores"][puntos_a_dibujar(len(v))], compradas, sin_invertir, metricas(ops, curva, capital)
+
+
+# ---------------------------------------------------------------------
+#  Aportaciones mensuales
+# ---------------------------------------------------------------------
+def cambios_de_mes(velas: pd.DataFrame) -> np.ndarray:
+    """Índices de la primera vela de cada mes, sin contar la primera de la serie. En la apertura
+    de cada una entra una aportación."""
+    mes = velas["fecha_hora_utc"].str[:7].to_numpy()
+    return np.flatnonzero(mes[1:] != mes[:-1]) + 1
+
+
+def participaciones(valores: np.ndarray, posiciones: np.ndarray, cambios: np.ndarray,
+                    f: float) -> tuple[np.ndarray, np.ndarray]:
+    """Lo que compra cada USDT aportado en las velas de `cambios`. La curva de un único capital
+    inicial (`valores`) hace de precio de una participación en la estrategia:
+      * si la estrategia está fuera, o entra en esa misma apertura, la aportación se suma a la
+        liquidez y entra con el resto;
+      * si sigue dentro, compra más al cierre de la vela anterior, pagando comisión.
+    Devuelve, acumulados tras 0, 1, 2... aportaciones, las participaciones compradas por USDT y
+    las aportaciones que se quedan sin invertir porque la estrategia ya había agotado el capital."""
+    antes = cambios - 1
+    sigue = (posiciones[cambios] != 0) & (posiciones[cambios] == posiciones[antes])
+    precio = np.where(posiciones[cambios] == 0, valores[cambios], valores[antes])
+    viva = precio > 0
+    compradas = np.where(viva, np.where(sigue, 1 - f, 1.0) / np.where(viva, precio, 1.0), 0.0)
+    return np.concatenate([[0.0], np.cumsum(compradas)]), np.concatenate([[0.0], np.cumsum(~viva)])
+
+
+def con_aportaciones(capital, aportacion: float, compradas: np.ndarray, sin_invertir: np.ndarray, hechas):
+    """Capital que habría en vez de `capital` (el de un único capital inicial) después de `hechas`
+    aportaciones mensuales. Vale para un punto o para toda la curva."""
+    return capital * (1 + aportacion * compradas[hechas]) + aportacion * sin_invertir[hechas]
 
 
 # ---------------------------------------------------------------------
@@ -176,6 +213,9 @@ def main() -> None:
                               format="DD/MM/YYYY", help="Vacío: hasta la última vela.")
         comision = st.number_input("Comisión por compra y por venta (%)", 0.0, 5.0, 0.1, step=0.05, format="%.2f")
         capital = st.number_input("Capital inicial (USDT)", 100.0, value=10_000.0, step=1_000.0, format="%.0f")
+        aportacion = st.number_input("Aportación mensual (USDT)", 0.0, value=0.0, step=100.0, format="%.0f",
+                                     help="Se añade en la apertura de la primera vela de cada mes. "
+                                          "Con 0 solo se invierte el capital inicial.")
         logaritmica = st.toggle("Escala logarítmica", value=True,
                                 help="Hace que una subida del 10 % mida lo mismo en cualquier punto del gráfico.")
 
@@ -191,10 +231,14 @@ def main() -> None:
     if len(tramo) < 2:
         st.warning("No hay velas en ese periodo.")
         st.stop()
+    cambios = cambios_de_mes(tramo)
+    aportado = capital + aportacion * len(cambios)
     comision_texto = f"{comision:g}".replace(".", ",")
     st.caption(f"{miles(len(tramo))} velas, del {fecha_corta(tramo['fecha_hora_utc'].iloc[0])} al "
                f"{fecha_corta(tramo['fecha_cierre_utc'].iloc[-1])} · {ETIQUETAS_DIRECCION[direccion].lower()} · "
-               f"comisión {comision_texto} % · capital inicial {miles(capital)} USDT")
+               f"comisión {comision_texto} % · capital inicial {miles(capital)} USDT"
+               + (f" · {len(cambios)} aportaciones de {miles(aportacion)} USDT · {miles(aportado)} USDT aportados"
+                  if aportacion else ""))
 
     # Casillas de las estrategias
     elegidas: dict[str, tuple[int, str, dict]] = {}
@@ -214,30 +258,43 @@ def main() -> None:
             elif marcada:
                 elegidas.setdefault(nombre, (i, e["codigo"], p))   # la misma dos veces se dibuja una
 
-    # Comprar y mantener: compra en la primera apertura y vende en el último cierre, con comisiones
     f = comision / 100
     idx = puntos_a_dibujar(len(tramo))
     fechas = pd.to_datetime(tramo["fecha_cierre_utc"].iloc[idx])
+    hechas = np.searchsorted(cambios, idx, side="right")   # aportaciones hechas hasta cada punto dibujado
+    fig = go.Figure()
+    dibujado = []
+    if aportacion:
+        dibujado.append(capital + aportacion * hechas)
+        fig.add_scatter(x=fechas, y=dibujado[-1], name="Aportado", mode="lines", hovertemplate="%{y:,.0f} USDT",
+                        line=dict(color=COLOR_REFERENCIA, width=1, dash="dot", shape="hv"))
+    else:
+        fig.add_hline(y=capital, line_width=1, line_dash="dot", line_color=COLOR_REFERENCIA)
+
+    # Comprar y mantener: compra en la primera apertura (y con cada aportación) y vende en el
+    # último cierre, con comisiones
     referencia = capital * (1 - f) * tramo["cierre"].to_numpy(float) / float(tramo["apertura"].iloc[0])
-    final = referencia[-1] * (1 - f)
-    filas = [{"Estrategia": "Comprar y mantener", "Rentabilidad %": (final / capital - 1) * 100,
+    compradas, sin_invertir = participaciones(referencia, np.ones(len(tramo), dtype=np.int8), cambios, f)
+    final = con_aportaciones(referencia[-1] * (1 - f), aportacion, compradas, sin_invertir, len(cambios))
+    filas = [{"Estrategia": "Comprar y mantener", "Rentabilidad %": (final / aportado - 1) * 100,
               "Capital final": final,
               "Máx. caída %": float(((1 - referencia / np.maximum.accumulate(referencia)) * 100).max()),
               "Operaciones": 1, "En mercado %": 100.0}]
-    fig = go.Figure()
-    fig.add_scatter(x=fechas, y=referencia[idx], name="Comprar y mantener", mode="lines",
+    dibujado.append(con_aportaciones(referencia[idx], aportacion, compradas, sin_invertir, hechas))
+    fig.add_scatter(x=fechas, y=dibujado[-1], name="Comprar y mantener", mode="lines",
                     line=dict(color=COLOR_REFERENCIA, width=2, dash="dash"), hovertemplate="%{y:,.0f} USDT")
-    dibujado = [referencia[idx]]
 
     clave_velas = (base, temporalidad, modificada)
     for nombre, (i, codigo, p) in elegidas.items():
         with st.spinner(f"Simulando {nombre}..."):
-            valores, m = calcular(velas, clave_velas, i0, i1, codigo, p, direccion, comision, capital)
-        fig.add_scatter(x=fechas, y=valores, name=nombre, mode="lines",
+            valores, compradas, sin_invertir, m = calcular(velas, clave_velas, i0, i1, codigo, p,
+                                                           direccion, comision, capital)
+        final = con_aportaciones(m["capital_final"], aportacion, compradas, sin_invertir, len(cambios))
+        dibujado.append(con_aportaciones(valores, aportacion, compradas, sin_invertir, hechas))
+        fig.add_scatter(x=fechas, y=dibujado[-1], name=nombre, mode="lines",
                         line=dict(color=COLORES[i % len(COLORES)], width=2), hovertemplate="%{y:,.0f} USDT")
-        dibujado.append(valores)
-        filas.append({"Estrategia": nombre, "Rentabilidad %": m["rentabilidad_total_pct"],
-                      "Capital final": m["capital_final"], "Máx. caída %": m["max_drawdown_pct"],
+        filas.append({"Estrategia": nombre, "Rentabilidad %": (final / aportado - 1) * 100,
+                      "Capital final": final, "Máx. caída %": m["max_drawdown_pct"],
                       "Operaciones": m["num_operaciones"], "Acierto %": m["pct_acierto"],
                       "Profit factor": m["profit_factor"],
                       "Sin el 5 % mejor %": m["rentabilidad_sin_mejores_5pct_pct"],
@@ -247,12 +304,11 @@ def main() -> None:
     if logaritmica:
         # El eje no baja de una milésima del capital inicial: una estrategia que lo pierde casi
         # todo se sale por abajo en vez de aplastar las demás curvas.
-        valores = np.concatenate(dibujado)
-        minimo = max(valores[valores > 0].min(), capital / 1000)
-        marcas, textos = marcas_log(minimo, valores.max())
+        todo = np.concatenate(dibujado)
+        minimo = max(todo[todo > 0].min(), capital / 1000)
+        marcas, textos = marcas_log(minimo, todo.max())
         eje_y.update(type="log", tickvals=marcas, ticktext=textos,
-                     range=[np.log10(minimo * 0.85), np.log10(valores.max() * 1.15)])
-    fig.add_hline(y=capital, line_width=1, line_dash="dot", line_color=COLOR_REFERENCIA)
+                     range=[np.log10(minimo * 0.85), np.log10(todo.max() * 1.15)])
     fig.update_layout(height=520, margin=dict(l=0, r=0, t=40, b=0), hovermode="x unified", separators=",.",
                       legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0), yaxis=eje_y,
                       xaxis=dict(hoverformat="%d/%m/%Y" if temporalidad in ("1d", "1w") else "%d/%m/%Y %H:%M"))
@@ -264,9 +320,10 @@ def main() -> None:
     # Columnas de la tabla: decimales y ayuda. Los números se escriben como en el navegador.
     columnas = {
         "Estrategia": (None, None),
-        "Rentabilidad %": (1, None),
+        "Rentabilidad %": (1, "Ganancia sobre todo lo aportado: el capital inicial y las aportaciones mensuales."),
         "Capital final": (0, "En USDT, con las comisiones descontadas."),
-        "Máx. caída %": (1, "Mayor caída del capital desde un máximo, con precios de cierre."),
+        "Máx. caída %": (1, "Mayor caída del capital desde un máximo, con precios de cierre. "
+                            "Es la de la estrategia con un único capital inicial: las aportaciones no cuentan."),
         "Operaciones": (0, None),
         "Acierto %": (1, "Operaciones que acaban en ganancia."),
         "Profit factor": (2, "Suma de ganancias entre suma de pérdidas. Por encima de 1 gana más de lo que pierde."),
@@ -281,6 +338,11 @@ def main() -> None:
         for c, (dec, ayuda) in columnas.items() if dec is not None})
     st.caption("La señal se calcula al cierre de una vela y la orden se ejecuta en la apertura de la siguiente. "
                "Cada entrada usa todo el capital. " + (NOTA_CORTOS if direccion != "solo_largos" else ""))
+    if aportacion:
+        st.caption("Cada aportación entra en la apertura de la primera vela del mes: si la estrategia está dentro "
+                   "del mercado compra más en ese momento, con comisión; si está fuera, espera en liquidez hasta la "
+                   "siguiente entrada. Las aportaciones cambian el gráfico, la rentabilidad y el capital final; el "
+                   "resto de la tabla describe la estrategia con un único capital inicial.")
 
 
 if __name__ == "__main__":
