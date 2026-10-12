@@ -28,10 +28,12 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from plotly.subplots import make_subplots
 
 import indicadores
 from backtesting import DIRECCIONES, NOTA_CORTOS, TEMPORALIDADES, leer_velas, metricas, simular
 from cargar_datos import BD_PRINCIPAL, ruta_bd_activo
+from cargar_datos import TEMPORALIDADES as MINUTOS_POR_VELA
 from estrategias import FUNCIONES
 
 # Casillas del dashboard: función de estrategias.py (FUNCIONES), parámetros con los que
@@ -53,6 +55,17 @@ COLOR_REFERENCIA = "#898781"
 ETIQUETAS_DIRECCION = {"largos_y_cortos": "Largos y cortos", "solo_largos": "Solo largos",
                        "solo_cortos": "Solo cortos"}
 MAX_PUNTOS = 4000   # puntos que se dibujan por curva; las métricas usan todas las velas
+
+# Gráfico de velas con las entradas y salidas de una estrategia
+CONTEXTO = 40       # velas que se ven antes de la entrada y después de la salida
+MAX_VELAS = 2500    # velas que se cargan como mucho, contando las de los lados para moverse
+MAX_ZONAS = 120     # operaciones que se sombrean como mucho
+MAX_LISTA = 2000    # filas que enseña como mucho la lista de operaciones
+FILAS_LISTA = 5     # filas de la lista que se ven sin desplazarla
+COLOR_SUBE, COLOR_BAJA = "#1baf7a", "#e34948"
+COLOR_ENTRADA, COLOR_SALIDA = "#6250d6", "#e87ba4"
+MOTIVOS = {"senal_salida": "señal de salida", "giro": "giro a la posición contraria",
+           "fin_periodo": "fin del periodo", "capital_agotado": "capital agotado"}
 
 
 # ---------------------------------------------------------------------
@@ -219,9 +232,19 @@ def numero(x: float, decimales: int = 0) -> str:
     return texto.translate(str.maketrans(",.", ".,"))
 
 
+def precio(x: float) -> str:
+    """Precio con cinco cifras significativas: 43.250, 3450,7, 25,430, 0,51230."""
+    return numero(x, min(8, max(0, 4 - math.floor(math.log10(abs(x)))))) if x else "0"
+
+
 def fecha_corta(texto: str) -> str:
     """'2017-08-17 00:00:00' -> '17/08/2017'."""
     return f"{texto[8:10]}/{texto[5:7]}/{texto[:4]}"
+
+
+def fecha_hora(texto: str, temporalidad: str) -> str:
+    """Fecha de una vela: con la hora si la temporalidad es de menos de un día."""
+    return fecha_corta(texto) + ("" if temporalidad in ("1d", "1w") else f" {texto[11:16]}")
 
 
 def marcas_log(minimo: float, maximo: float) -> tuple[list[float], list[str]]:
@@ -230,6 +253,195 @@ def marcas_log(minimo: float, maximo: float) -> tuple[list[float], list[str]]:
     e0, e1 = int(np.floor(np.log10(minimo))), int(np.ceil(np.log10(maximo)))
     marcas = [m * 10.0 ** e for e in range(e0, e1 + 1) for m in ((1, 2, 5) if e1 - e0 <= 3 else (1,))]
     return marcas, [miles(t) if t >= 1 else f"{t:g}".replace(".", ",") for t in marcas]
+
+
+# ---------------------------------------------------------------------
+#  Entradas y salidas en velas
+# ---------------------------------------------------------------------
+@st.cache_data(max_entries=30, show_spinner=False)
+def operaciones(_velas: pd.DataFrame, clave_velas: tuple, i0: int, i1: int, codigo: str, parametros: dict,
+                direccion: str, comision: float, capital: float) -> pd.DataFrame:
+    """Operaciones de una estrategia en las velas i0..i1, una por fila. vela_entrada y vela_salida
+    son posiciones dentro de ese tramo: se entra en la apertura de la primera y se sale en la de
+    la segunda (que es el número de velas si la operación llega hasta el final)."""
+    v, p = preparar(_velas, codigo, parametros)
+    v = v.iloc[i0:i1]
+    ops, _ = simular(v, FUNCIONES[codigo](v, p), direccion, comision, capital)
+    o = pd.DataFrame(ops, columns=["direccion", "fecha_entrada_utc", "precio_entrada", "fecha_salida_utc",
+                                   "precio_salida", "motivo_salida", "duracion_velas", "rentabilidad_pct"])
+    aperturas = v["fecha_hora_utc"].to_numpy()
+    o["vela_entrada"] = np.searchsorted(aperturas, o["fecha_entrada_utc"].to_numpy())
+    o["vela_salida"] = np.searchsorted(aperturas, o["fecha_salida_utc"].to_numpy())
+    return o
+
+
+def indicadores_de(codigo: str, parametros: dict, p: dict) -> dict:
+    """Indicadores de la estrategia que acompañan a las velas, como (nombre, columna, color):
+    los de "precio" van sobre las velas y los de "panel" en un gráfico aparte, debajo, con sus
+    "niveles". Una estrategia que no esté aquí se ve solo con las velas."""
+    azul, naranja, violeta = COLORES[0], COLORES[1], COLORES[6]
+    if codigo == "cruce_medias":
+        tipo = parametros["tipo"].upper()
+        return {"precio": [(f"{tipo} {parametros['rapida']}", p["media_rapida"], azul),
+                           (f"{tipo} {parametros['lenta']}", p["media_lenta"], naranja)]}
+    if codigo == "rebote_bollinger":
+        return {"precio": [("Banda superior", "bb_superior", COLOR_REFERENCIA), ("Media (SMA 20)", "sma_20", naranja),
+                           ("Banda inferior", "bb_inferior", COLOR_REFERENCIA)]}
+    if codigo == "rsi_extremos":
+        return {"panel": [("RSI 14", "rsi_14", violeta)], "titulo": "RSI",
+                "niveles": [parametros["sobreventa"], parametros["sobrecompra"]]}
+    if codigo == "cruce_macd":
+        return {"panel": [("MACD", "macd", azul), ("Señal", "macd_senal", naranja)], "titulo": "MACD", "niveles": [0]}
+    return {}
+
+
+def grafico_velas(v: pd.DataFrame, ops: pd.DataFrame, elegida: int, dibujo: dict, contexto: int,
+                  simbolo: str, temporalidad: str) -> go.Figure:
+    """Velas alrededor de la operación `elegida`. Se ven `contexto` velas antes de la entrada y
+    después de la salida, y se cargan más a los lados para poder moverse. Sombrea y marca las
+    operaciones que caen ahí y dibuja los indicadores de la estrategia."""
+    o, n = ops.iloc[elegida], len(v)
+    ver0 = max(int(o["vela_entrada"]) - contexto, 0)
+    ver1 = min(int(o["vela_salida"]) + contexto, ver0 + MAX_VELAS, n) - 1     # última vela a la vista
+    margen = min(max(2 * (ver1 - ver0 + 1), 150), max((MAX_VELAS - (ver1 - ver0 + 1)) // 2, 0))
+    a, b = max(ver0 - margen, 0), min(ver1 + 1 + margen, n)
+    w = v.iloc[a:b]
+    x = pd.to_datetime(w["fecha_hora_utc"])
+
+    panel = dibujo.get("panel")
+    fig = make_subplots(rows=2 if panel else 1, cols=1, shared_xaxes=True, vertical_spacing=0.04,
+                        row_heights=[0.72, 0.28] if panel else None)
+    fig.add_trace(go.Candlestick(
+        x=x, open=w["apertura"], high=w["maximo"], low=w["minimo"], close=w["cierre"], name=simbolo,
+        increasing_line_color=COLOR_SUBE, decreasing_line_color=COLOR_BAJA,
+        hovertemplate="apertura %{open:,.6~g} · máximo %{high:,.6~g} · mínimo %{low:,.6~g} · "
+                      "cierre %{close:,.6~g}<extra></extra>"),
+        row=1, col=1)
+    for nombre, columna, color in dibujo.get("precio", []):
+        fig.add_scatter(x=x, y=w[columna], name=nombre, mode="lines", line=dict(color=color, width=1.5),
+                        hovertemplate="%{y:,.6~g}", row=1, col=1)
+    for nombre, columna, color in panel or []:
+        fig.add_scatter(x=x, y=w[columna], name=nombre, mode="lines", line=dict(color=color, width=1.5),
+                        hovertemplate="%{y:,.5~g}", row=2, col=1)
+    for nivel in dibujo.get("niveles", []):
+        fig.add_hline(y=nivel, line_width=1, line_dash="dot", line_color=COLOR_REFERENCIA, row=2, col=1)
+
+    # Operaciones que caen en las velas cargadas (más marcada la elegida): una franja en la vela
+    # cuyo cierre dio la señal de entrada, que es la anterior a la entrada; una zona sombreada de
+    # la entrada a la salida, verde si gana y roja si pierde; y una marca en cada una
+    media_vela = pd.Timedelta(minutes=MINUTOS_POR_VELA[temporalidad] / 2)
+    dentro = ops[(ops["vela_salida"] > a) & (ops["vela_entrada"] < b)]
+    cercanas = dentro.loc[np.abs(dentro.index - elegida).argsort()[:MAX_ZONAS]] if len(dentro) > MAX_ZONAS else dentro
+    for j, t in cercanas.iterrows():
+        if t["vela_entrada"] > a:
+            senal = x.iloc[t["vela_entrada"] - 1 - a]
+            fig.add_vrect(x0=senal - media_vela, x1=senal + media_vela, line_width=0, layer="below",
+                          fillcolor=COLOR_ENTRADA, opacity=0.45 if j == elegida else 0.2, row="all", col=1)
+        fig.add_vrect(x0=t["fecha_entrada_utc"], x1=t["fecha_salida_utc"], line_width=0, layer="below",
+                      fillcolor=COLOR_SUBE if t["rentabilidad_pct"] > 0 else COLOR_BAJA,
+                      opacity=0.22 if j == elegida else 0.08, row=1, col=1)
+    fig.add_scatter(x=[None], y=[None], name="Vela de la señal", mode="markers", row=1, col=1,   # solo para la leyenda
+                    marker=dict(symbol="square", size=12, color=COLOR_ENTRADA, opacity=0.45))
+    borde = dict(color="white", width=1.5)
+    for nombre, marca, filas in (("Entrada en largo", "triangle-up", dentro["direccion"] == "largo"),
+                                 ("Entrada en corto", "triangle-down", dentro["direccion"] == "corto")):
+        if filas.any():
+            fig.add_scatter(x=dentro.loc[filas, "fecha_entrada_utc"], y=dentro.loc[filas, "precio_entrada"],
+                            name=nombre, mode="markers", hovertemplate="%{y:,.6~g} USDT",
+                            marker=dict(symbol=marca, size=14, color=COLOR_ENTRADA, line=borde), row=1, col=1)
+    fig.add_scatter(x=dentro["fecha_salida_utc"], y=dentro["precio_salida"], name="Salida", mode="markers",
+                    hovertemplate="%{y:,.6~g} USDT", marker=dict(symbol="square", size=10, color=COLOR_SALIDA, line=borde),
+                    row=1, col=1)
+    abajo = 1 if o["direccion"] == "largo" else -1      # la entrada de un largo se rotula por debajo
+    rotulo = dict(ax=0, arrowhead=2, bgcolor="rgba(128, 128, 128, 0.35)", borderpad=3, row=1, col=1)
+    fig.add_annotation(x=o["fecha_entrada_utc"], y=o["precio_entrada"], ay=50 * abajo, arrowcolor=COLOR_ENTRADA,
+                       text=f"Entrada<br>{precio(o['precio_entrada'])} USDT", **rotulo)
+    fig.add_annotation(x=o["fecha_salida_utc"], y=o["precio_salida"], ay=-55 * abajo, arrowcolor=COLOR_SALIDA,
+                       text=f"Salida<br>{precio(o['precio_salida'])} USDT<br>{numero(o['rentabilidad_pct'], 1)} %",
+                       **rotulo)
+
+    # A la vista quedan las velas ver0..ver1, con la escala de precios ajustada a ellas
+    visibles = v.iloc[ver0:ver1 + 1]
+    minimo, maximo = visibles["minimo"].min(), visibles["maximo"].max()
+    fig.update_xaxes(range=[x.iloc[ver0 - a] - media_vela, x.iloc[ver1 - a] + media_vela], rangeslider_visible=False,
+                     tickformatstops=[dict(dtickrange=[None, 86_400_000], value="%d/%m %H:%M"),
+                                      dict(dtickrange=[86_400_000, None], value="%d/%m/%Y")],
+                     hoverformat="%d/%m/%Y" if temporalidad in ("1d", "1w") else "%d/%m/%Y %H:%M")
+    fig.update_yaxes(title="Precio (USDT)", tickformat=",", row=1, col=1,
+                     range=[minimo - 0.06 * (maximo - minimo), maximo + 0.06 * (maximo - minimo)])
+    if panel:
+        fig.update_yaxes(title=dibujo["titulo"], row=2, col=1)
+    fig.update_layout(height=700 if panel else 580, margin=dict(l=0, r=0, t=40, b=0), hovermode="x unified",
+                      separators=",.", dragmode="pan", legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
+    return fig
+
+
+def ir_a_operacion(clave_lista: str, clave_numero: str, primera: int) -> None:
+    """Al marcar una fila de la lista de operaciones, pone su número en la casilla de la
+    operación. `primera` es la operación de la primera fila de la lista."""
+    filas = st.session_state[clave_lista]["selection"]["rows"]
+    if filas:
+        st.session_state[clave_numero] = primera + filas[0] + 1
+
+
+def ver_operaciones(velas: pd.DataFrame, clave_velas: tuple, i0: int, i1: int, simbolo: str, temporalidad: str,
+                    nombre: str, codigo: str, parametros: dict, direccion: str, comision: float,
+                    capital: float) -> None:
+    """Apartado con las entradas y salidas de una estrategia: se elige una operación, por su
+    número o en la lista, y se ve en un gráfico de velas, con las de alrededor."""
+    st.subheader(f"Entradas y salidas de {nombre} en {simbolo} · {temporalidad}")
+    ops = operaciones(velas, clave_velas, i0, i1, codigo, parametros, direccion, comision, capital)
+    if ops.empty:
+        st.info("Esta estrategia no hace ninguna operación en este periodo.")
+        return
+    v, p = preparar(velas, codigo, parametros)
+    v = v.iloc[i0:i1]
+
+    # Las claves hacen que se vuelva a la primera operación al cambiar de estrategia, activo o periodo
+    clave = f"{simbolo}|{temporalidad}|{nombre}|{direccion}|{i0}|{i1}"
+    clave_numero, clave_lista = f"operacion|{clave}", f"lista|{clave}"
+    c1, c2, c3 = st.columns([1, 1, 4], vertical_alignment="bottom")
+    elegida = c1.number_input(f"Operación (de {len(ops)})", 1, len(ops), 1, key=clave_numero,
+                              help="Por orden de entrada. Con + y - se pasa a la siguiente y a la anterior.") - 1
+    contexto = c2.number_input("Velas de contexto", 5, 500, CONTEXTO, step=5,
+                               help="Velas que se ven antes de la entrada y después de la salida.")
+    o = ops.iloc[elegida]
+    senal = v["fecha_hora_utc"].iloc[o["vela_entrada"] - 1]
+    c3.markdown(f"**{o['direccion'].capitalize()}** · señal al cierre de la vela del {fecha_hora(senal, temporalidad)} · "
+                f"entrada el {fecha_hora(o['fecha_entrada_utc'], temporalidad)} a {precio(o['precio_entrada'])} USDT · "
+                f"salida el {fecha_hora(o['fecha_salida_utc'], temporalidad)} a {precio(o['precio_salida'])} USDT "
+                f"({MOTIVOS[o['motivo_salida']]}) · {o['duracion_velas']} velas · "
+                f"**{numero(o['rentabilidad_pct'], 1)} %**")
+
+    # Lista de operaciones: al marcar una, el gráfico va a ella. Con muchas se ven las de alrededor
+    # de la elegida, que siempre queda marcada
+    primera = min(max(elegida - MAX_LISTA // 2, 0), max(len(ops) - MAX_LISTA, 0))
+    parte = ops.iloc[primera:primera + MAX_LISTA]
+    lista = pd.DataFrame({
+        "Operación": parte.index + 1, "Dirección": parte["direccion"].str.capitalize(),
+        "Entrada": pd.to_datetime(parte["fecha_entrada_utc"]), "Precio de entrada": parte["precio_entrada"],
+        "Salida": pd.to_datetime(parte["fecha_salida_utc"]), "Precio de salida": parte["precio_salida"],
+        "Motivo de salida": parte["motivo_salida"].map(MOTIVOS), "Velas": parte["duracion_velas"],
+        "Resultado": parte["rentabilidad_pct"]})
+    fecha = "%d/%m/%Y" if temporalidad in ("1d", "1w") else "%d/%m/%Y %H:%M"
+    st.session_state[clave_lista] = {"selection": {"rows": [elegida - primera]}}
+    st.dataframe(lista.style.format({
+        "Entrada": lambda t: t.strftime(fecha), "Salida": lambda t: t.strftime(fecha),
+        "Precio de entrada": lambda x: precio(x) + " USDT", "Precio de salida": lambda x: precio(x) + " USDT",
+        "Resultado": lambda x: numero(x, 1) + " %"}),
+        hide_index=True, height=38 + 35 * min(len(lista), FILAS_LISTA), key=clave_lista, selection_mode="single-row",
+        on_select=lambda: ir_a_operacion(clave_lista, clave_numero, primera))
+    st.caption("Marca una operación de la lista para verla en el gráfico. La lista se ordena pulsando en una "
+               "cabecera: por ejemplo, por resultado, para ir a la mejor o a la peor."
+               + (f" Enseña {miles(MAX_LISTA)} de las {miles(len(ops))} operaciones: las más cercanas a la elegida."
+                  if len(ops) > MAX_LISTA else ""))
+
+    fig = grafico_velas(v, ops, elegida, indicadores_de(codigo, parametros, p), contexto, simbolo, temporalidad)
+    st.plotly_chart(fig, config={"displaylogo": False})
+    st.caption("Arrastra el gráfico para moverte en el tiempo; con los botones + y - de su esquina se acerca o se "
+               "aleja, y con doble clic vuelve a la vista inicial. La franja violeta es la vela cuyo cierre dio la "
+               "señal; la entrada es en la apertura de la siguiente. La zona sombreada va de la entrada a la salida: "
+               "verde si la operación gana, roja si pierde. El resultado descuenta las comisiones.")
 
 
 def main() -> None:
@@ -390,8 +602,14 @@ def main() -> None:
     tabla = pd.DataFrame(filas, columns=list(columnas))
     formatos = {c: (lambda x, dec=dec, unidad=unidad: numero(x, dec) + unidad)
                 for c, (dec, unidad, _) in columnas.items() if dec is not None}
-    st.dataframe(tabla.style.format(formatos, na_rep="-"), hide_index=True, placeholder="-",
-                 column_config={c: st.column_config.Column(help=texto) for c, (_, _, texto) in columnas.items()})
+    st.caption("Marca la casilla de la izquierda de una estrategia para ver sus entradas y salidas en un gráfico "
+               "de velas, al final de la página.")
+    # La clave lleva las casillas marcadas: si cambian las filas, se quita la selección
+    seleccion = st.dataframe(
+        tabla.style.format(formatos, na_rep="-"), hide_index=True, placeholder="-",
+        column_config={c: st.column_config.Column(help=texto) for c, (_, _, texto) in columnas.items()},
+        on_select="rerun", selection_mode="single-row",
+        key="tabla|" + "-".join(str(i) for i, _, _ in elegidas.values())).selection.rows
     st.markdown("**Qué representa cada columna**\n\n"
                 + "\n".join(f"- **{c}**: {texto}" for c, (_, _, texto) in columnas.items())
                 + "\n\nDe la caída máxima en adelante, las columnas describen la estrategia con un único capital "
@@ -402,6 +620,14 @@ def main() -> None:
         st.caption("Cada aportación entra en la apertura de la primera vela del mes: si la estrategia está dentro "
                    "del mercado compra más en ese momento, con comisión; si está fuera, espera en liquidez hasta la "
                    "siguiente entrada.")
+
+    # Entradas y salidas de la estrategia marcada en la tabla (la fila 0 es comprar y mantener)
+    if seleccion and seleccion[0] == 0:
+        st.info("Comprar y mantener no tiene entradas y salidas que enseñar: compra al principio y no vende.")
+    elif seleccion and seleccion[0] <= len(elegidas):
+        nombre, (_, codigo, p) = list(elegidas.items())[seleccion[0] - 1]
+        ver_operaciones(velas, clave_velas, i0, i1, simbolo, temporalidad, nombre, codigo, p,
+                        direccion, comision, capital)
 
 
 if __name__ == "__main__":

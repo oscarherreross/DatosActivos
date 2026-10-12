@@ -339,12 +339,24 @@ También se puede abrir desde una consola en la carpeta DatosActivos: `streamlit
   resultado. Se ordena pulsando en la cabecera de una columna (esa, al llevar dos cifras, se ordena como
   texto). Debajo de la tabla se explica qué representa cada columna.
 
+- **Entradas y salidas en velas**: al marcar la casilla de la izquierda de una estrategia en la tabla,
+  aparece al final de la página un gráfico de velas japonesas de ese activo con sus operaciones. La
+  operación se elige por su número (con `+` y `-` se pasa a la siguiente y a la anterior) o marcándola en
+  la lista de operaciones, que se puede ordenar, por ejemplo por resultado, para ir a la mejor o a la
+  peor. El gráfico se coloca en ella, con las velas de contexto que se indiquen antes de la entrada y
+  después de la salida. La franja violeta es la vela cuyo cierre dio la señal de entrada; la zona
+  sombreada va de la entrada a la salida (verde si gana, roja si pierde), con una marca en cada una, y se
+  dibujan los indicadores de la estrategia: las medias, las bandas de Bollinger, el RSI o el MACD. El
+  gráfico se arrastra para moverse en el tiempo. Con más de 2.000 operaciones, la lista enseña las 2.000
+  más cercanas a la elegida.
+
 Usa el mismo motor y las mismas reglas que `ejecutar_backtests.bat`, así que las cifras coinciden. Solo
 lee las bases de datos de los activos: no guarda nada en `backtests.db`. La primera vez que se elige una
 temporalidad de 5m tarda unos 15 segundos en leer las velas; después responde al momento.
 
 Para añadir una estrategia a las casillas, escribe su función en `estrategias.py`, regístrala en
-`FUNCIONES` y añádela a `CATALOGO` y a `TITULOS`, en `codigo/dashboard.py`.
+`FUNCIONES` y añádela a `CATALOGO` y a `TITULOS`, en `codigo/dashboard.py`. Para que el gráfico de velas
+dibuje también sus indicadores, añádelos en `indicadores_de`, en el mismo archivo.
 
 ## Estudio de tendencias
 
