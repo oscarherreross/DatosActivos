@@ -20,6 +20,7 @@ Para añadir una estrategia a las casillas:
 
 from __future__ import annotations
 
+import math
 import sqlite3
 from datetime import date
 
@@ -127,16 +128,48 @@ def puntos_a_dibujar(n: int) -> np.ndarray:
 
 @st.cache_data(max_entries=300, show_spinner=False)
 def calcular(_velas: pd.DataFrame, clave_velas: tuple, i0: int, i1: int, codigo: str, parametros: dict,
-             direccion: str, comision: float, capital: float) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
-    """Simula una estrategia en las velas i0..i1 con un único capital inicial. Devuelve su curva
-    de capital (solo los puntos que se dibujan), lo que compraría cada aportación mensual (ver
-    participaciones) y sus métricas. _velas no cuenta para la caché: la identifica clave_velas."""
+             direccion: str, comision: float, capital: float) -> dict:
+    """Simula una estrategia en las velas i0..i1 con un único capital inicial. Devuelve:
+      valores       su curva de capital, solo en los puntos que se dibujan
+      metricas      las de backtesting.metricas
+      aportaciones  lo que compraría cada aportación mensual (ver participaciones)
+      sin_mejores   lo mismo, si no hubiera hecho el 5 % de las operaciones con mejor resultado;
+                    None si no hay operaciones
+    _velas no cuenta para la caché: la identifica clave_velas."""
     v, p = preparar(_velas, codigo, parametros)
     v = v.iloc[i0:i1]
     ops, curva = simular(v, FUNCIONES[codigo](v, p), direccion, comision, capital)
-    compradas, sin_invertir = participaciones(curva["valores"], curva["posiciones"], cambios_de_mes(v),
-                                              comision / 100)
-    return curva["valores"][puntos_a_dibujar(len(v))], compradas, sin_invertir, metricas(ops, curva, capital)
+    cambios, f = cambios_de_mes(v), comision / 100
+    return {"valores": curva["valores"][puntos_a_dibujar(len(v))], "metricas": metricas(ops, curva, capital),
+            "aportaciones": participaciones(curva["valores"], curva["posiciones"], cambios, f),
+            "sin_mejores": participaciones(*sin_mejores(v, ops, curva), cambios, f) if ops else None}
+
+
+def sin_mejores(v: pd.DataFrame, ops: list[dict], curva: dict) -> tuple[np.ndarray, np.ndarray]:
+    """Curva de capital y posiciones que habría habido si la estrategia se hubiera quedado fuera
+    del mercado en el 5 % de las operaciones con mejor resultado (como mínimo una): las mismas que
+    quita metricas para calcular rentabilidad_sin_mejores_5pct_pct."""
+    r = np.array([o["rentabilidad_pct"] for o in ops])
+    quitadas = [ops[i] for i in np.sort(np.argsort(r, kind="stable")[::-1][:max(1, math.ceil(0.05 * len(r)))])]
+    # Cada operación va de la apertura de la vela `entradas` a la de la vela `salidas`
+    aperturas = v["fecha_hora_utc"].to_numpy()
+    entradas = np.searchsorted(aperturas, [o["fecha_entrada_utc"] for o in quitadas])
+    salidas = np.searchsorted(aperturas, [o["fecha_salida_utc"] for o in quitadas])
+    antes = np.array([o["capital_entrada"] for o in quitadas])
+    despues = np.array([o["capital_salida"] for o in quitadas])
+
+    # Desde que acaba una operación quitada, el capital es el que había antes de entrar en ella
+    n = len(aperturas)
+    acabada = despues > 0            # la que agota el capital es la última: después no hay nada
+    factor = np.ones(n + 1)
+    factor[salidas[acabada]] = antes[acabada] / despues[acabada]
+    escala = np.cumprod(factor)[:n]
+    valores, posiciones = curva["valores"] * escala, curva["posiciones"].copy()
+    for entrada, salida, previo, sigue in zip(entradas, salidas, antes, acabada):
+        fin = salida if sigue else n
+        valores[entrada:fin] = escala[entrada] * previo
+        posiciones[entrada:fin] = 0
+    return valores, posiciones
 
 
 # ---------------------------------------------------------------------
@@ -178,6 +211,12 @@ def con_aportaciones(capital, aportacion: float, compradas: np.ndarray, sin_inve
 def miles(x: float) -> str:
     """12345.6 -> '12.346'."""
     return f"{x:,.0f}".replace(",", ".")
+
+
+def numero(x: float, decimales: int = 0) -> str:
+    """Número como los escribe la tabla en un navegador en español: 7034, 35.940, 259,4."""
+    texto = f"{x:,.{decimales}f}" if abs(x) >= 10_000 else f"{x:.{decimales}f}"
+    return texto.translate(str.maketrans(",.", ".,"))
 
 
 def fecha_corta(texto: str) -> str:
@@ -287,10 +326,15 @@ def main() -> None:
     clave_velas = (base, temporalidad, modificada)
     for nombre, (i, codigo, p) in elegidas.items():
         with st.spinner(f"Simulando {nombre}..."):
-            valores, compradas, sin_invertir, m = calcular(velas, clave_velas, i0, i1, codigo, p,
-                                                           direccion, comision, capital)
-        final = con_aportaciones(m["capital_final"], aportacion, compradas, sin_invertir, len(cambios))
-        dibujado.append(con_aportaciones(valores, aportacion, compradas, sin_invertir, hechas))
+            r = calcular(velas, clave_velas, i0, i1, codigo, p, direccion, comision, capital)
+        m = r["metricas"]
+        final = con_aportaciones(m["capital_final"], aportacion, *r["aportaciones"], len(cambios))
+        dibujado.append(con_aportaciones(r["valores"], aportacion, *r["aportaciones"], hechas))
+        sin_mejor = None
+        if r["sin_mejores"]:
+            sin_mejor = con_aportaciones(capital * (1 + m["rentabilidad_sin_mejores_5pct_pct"] / 100),
+                                         aportacion, *r["sin_mejores"], len(cambios))
+            sin_mejor = f"{numero(sin_mejor)} USDT ({numero((sin_mejor / aportado - 1) * 100, 1)} %)"
         fig.add_scatter(x=fechas, y=dibujado[-1], name=nombre, mode="lines",
                         line=dict(color=COLORES[i % len(COLORES)], width=2), hovertemplate="%{y:,.0f} USDT")
         filas.append({"Estrategia": nombre, "Total aportado": aportado,
@@ -298,7 +342,7 @@ def main() -> None:
                       "Máx. caída %": m["max_drawdown_pct"],
                       "Operaciones": m["num_operaciones"], "Acierto %": m["pct_acierto"],
                       "Profit factor": m["profit_factor"],
-                      "Sin el 5 % mejor %": m["rentabilidad_sin_mejores_5pct_pct"],
+                      "Sin el 5 % mejor": sin_mejor,
                       "En mercado %": m["tiempo_en_mercado_pct"]})
 
     eje_y: dict = {"title": "Capital (USDT)", "tickformat": ",.0f"}
@@ -329,15 +373,16 @@ def main() -> None:
                              "posición que siga abierta cerrada al último precio."),
         "Rentabilidad %": (1, "Ganancia o pérdida sobre el total aportado: capital final entre total aportado, "
                               "menos 1."),
+        "Sin el 5 % mejor": (None, "Capital final, y entre paréntesis su rentabilidad sobre el total aportado, si la "
+                                   "estrategia se hubiera quedado fuera del mercado en el 5 % de las operaciones con "
+                                   "mejor resultado (como mínimo, una). Si queda por debajo del total aportado, el "
+                                   "resultado depende de unas pocas operaciones y la estrategia es frágil."),
         "Máx. caída %": (1, "Mayor caída del capital desde un máximo anterior, con precios de cierre y sin contar "
                             "las aportaciones."),
         "Operaciones": (0, "Veces que la estrategia entra en el mercado."),
         "Acierto %": (1, "Porcentaje de operaciones que acaban en ganancia, con las comisiones descontadas."),
         "Profit factor": (2, "Suma de las ganancias entre suma de las pérdidas, en USDT. Por encima de 1 gana más "
                              "de lo que pierde."),
-        "Sin el 5 % mejor %": (1, "Rentabilidad que quedaría quitando el 5 % de las operaciones con mejor resultado "
-                                  "(como mínimo, una). Si pasa a negativo, el resultado depende de unas pocas "
-                                  "operaciones y la estrategia es frágil."),
         "En mercado %": (1, "Porcentaje de velas con una posición abierta."),
     }
     tabla = pd.DataFrame(filas, columns=list(columnas))
@@ -349,8 +394,7 @@ def main() -> None:
     st.markdown("**Qué representa cada columna**\n\n"
                 + "\n".join(f"- **{c}**: {texto}" for c, (_, texto) in columnas.items())
                 + "\n\nDe la caída máxima en adelante, las columnas describen la estrategia con un único capital "
-                  "inicial: las aportaciones mensuales solo cambian el total aportado, el capital final y la "
-                  "rentabilidad.")
+                  "inicial: las aportaciones mensuales solo cambian las columnas anteriores.")
     st.caption("La señal se calcula al cierre de una vela y la orden se ejecuta en la apertura de la siguiente. "
                "Cada entrada usa todo el capital. " + (NOTA_CORTOS if direccion != "solo_largos" else ""))
     if aportacion:
